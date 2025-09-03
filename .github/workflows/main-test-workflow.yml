@@ -1,31 +1,26 @@
 # This is the name of the workflow, which will be displayed in the GitHub Actions tab.
 name: QA Test General
 
-# As a security best practice, this explicitly sets the permissions for the
-# GITHUB_TOKEN to be read-only, following the principle of least privilege.
+# Principle of least privilege for GITHUB_TOKEN
 permissions:
   contents: read
 
-# This section defines the events that trigger the workflow.
+# Manual trigger only (no cron) to avoid costs and automatic runs
 on:
-  # 'workflow_dispatch' allows the workflow to be run manually from the Actions tab.
   workflow_dispatch:
 
-# The concurrency group ensures that only one instance of this workflow runs at a time for this branch.
-# If a new workflow run is triggered while one is already in progress, the older one will be canceled.
+# Ensure only one run at a time
 concurrency:
   group: ${{ github.workflow }}
   cancel-in-progress: true
 
-# This section defines the jobs that will be executed as part of the workflow.
 jobs:
-  # This job runs Lighthouse CI to audit performance, SEO, and best practices.
+  # --- Lighthouse: performance/SEO/best practices ---
   lighthouse:
     name: "Test de Performance (Lighthouse)"
     runs-on: ubuntu-latest
     timeout-minutes: 8
     steps:
-      # FINAL FIX: Added a check to prevent running against google.com
       - name: "Sanity check BASE_URL"
         run: |
           if [ -z "${{ vars.BASE_URL }}" ]; then
@@ -41,13 +36,12 @@ jobs:
           node-version: 20
       - run: npm install -g @lhci/cli
       - name: "Run Lighthouse CI (1 run to optimize)"
+        env:
+          LHCI_BUILD_CONTEXT__CURRENT_HASH: ${{ github.sha }}
         run: |
-          lhci autorun \
-            --collect.url="${{ vars.BASE_URL }}" \
-            --collect.numberOfRuns=1 \
-            --upload.target=temporary-public-storage
+          lhci autorun             --collect.url="${{ vars.BASE_URL }}"             --collect.numberOfRuns=1             --upload.target=temporary-public-storage
 
-  # This job runs Pa11y to perform accessibility testing using the Axe engine.
+  # --- Pa11y (Axe): accesibilidad ---
   a11y:
     name: "Test de Accesibilidad (Pa11y)"
     runs-on: ubuntu-latest
@@ -70,24 +64,27 @@ jobs:
       - name: "Run Pa11y with Axe"
         run: |
           BASE="${{ vars.BASE_URL }}"; BASE="${BASE%/}"
-          cat > pa11yci.json <<EOF2
+          cat > pa11yci.json <<EOF
           {
-            "defaults": { "timeout": 30000 },
+            "defaults": {
+              "timeout": 30000,
+              "runners": ["axe"],
+              "chromeLaunchConfig": { "args": ["--no-sandbox","--disable-setuid-sandbox"] }
+            },
             "urls": [
               "$BASE/",
               "$BASE/contacto/",
               "$BASE/blog/"
-            ],
-            "chromeLaunchConfig": { "args": ["--no-sandbox"] }
+            ]
           }
-          EOF2
+          EOF
           pa11y-ci --config pa11yci.json
 
-  # This job runs an OWASP ZAP baseline scan to find basic, passive security vulnerabilities.
+  # --- ZAP Baseline: seguridad pasiva ---
   zap_baseline:
     name: "Test de Seguridad Basico (ZAP)"
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - name: "Sanity check BASE_URL"
         run: |
@@ -99,13 +96,14 @@ jobs:
             echo "Error: Do not use google.com as BASE_URL."
             exit 1
           fi
-      - uses: zaproxy/action-baseline@v0.10.0
+      - uses: zaproxy/action-baseline@v0.14.0
         with:
           target: "${{ vars.BASE_URL }}"
           fail_action: false
           allow_issue_writing: false
+          # omitimos artifact_name para evitar conflictos de nombres
 
-  # This job runs WPScan to find WordPress-specific vulnerabilities.
+  # --- WPScan (oficial vía Docker) ---
   wpscan:
     name: "Test de WordPress (WPScan)"
     runs-on: ubuntu-latest
@@ -121,7 +119,6 @@ jobs:
             echo "Error: Do not use google.com as BASE_URL."
             exit 1
           fi
-      - uses: actions/checkout@v4
       - name: "Check if target is WordPress (and accessible)"
         id: check_wp
         run: |
@@ -131,12 +128,14 @@ jobs:
           else
             echo "is_wordpress=true" >> $GITHUB_OUTPUT
           fi
-      - name: "Run WPScan"
+      - name: "Run WPScan (official Docker image)"
         if: steps.check_wp.outputs.is_wordpress == 'true'
-        uses: wpscanteam/wpscan-action@v5
-        with:
-          args: --url ${{ vars.BASE_URL }} --stealthy --ignore-main-redirect --format cli
-          api-token: ${{ secrets.WPSCAN_API_TOKEN }}
-      - name: "Skip WPScan"
-        if: steps.check_wp.outputs.is_wordpress == 'false'
-        run: echo "Site does not appear to be WordPress or is protected. Skipping WPScan."
+        run: |
+          docker run --rm \
+            -e WPSCAN_API_TOKEN="${{ secrets.WPSCAN_API_TOKEN }}" \
+            wpscanteam/wpscan \
+              --url "${{ vars.BASE_URL }}" \
+              --stealthy \
+              --ignore-main-redirect \
+              --format cli \
+              --api-token "${{ secrets.WPSCAN_API_TOKEN }}"
