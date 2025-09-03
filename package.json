@@ -1,0 +1,9 @@
+{
+  "name": "workspace",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "docs:code:regen": "node scripts/generate_full_code_reference.mjs",
+    "docs:docs:regen": "node scripts/generate_full_docs_reference.mjs"
+  }
+}
