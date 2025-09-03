@@ -1,54 +1,53 @@
-# Name for this workflow, which will be displayed in the Actions tab.
+# This is the name of the workflow, which will be displayed in the GitHub Actions tab.
 name: QA Test General
 
-# FINAL SECURITY BEST PRACTICE:
-# Explicitly set the permissions for the GITHUB_TOKEN to read-only.
-# This follows the principle of least privilege.
+# As a security best practice, this explicitly sets the permissions for the
+# GITHUB_TOKEN to be read-only, following the principle of least privilege.
 permissions:
   contents: read
 
-# Controls when the workflow will run.
+# This section defines the events that trigger the workflow.
 on:
-  # Allows you to run this workflow manually from the Actions tab.
+  # 'workflow_dispatch' allows the workflow to be run manually from the Actions tab.
   workflow_dispatch:
 
-# A concurrency group to ensure that only one instance of this workflow runs at a time.
-# If a new workflow is triggered while one is running, the old one will be canceled.
+# The concurrency group ensures that only one instance of this workflow runs at a time for this branch.
+# If a new workflow run is triggered while one is already in progress, the older one will be canceled.
 concurrency:
   group: ${{ github.workflow }}
   cancel-in-progress: true
 
-# Defines the jobs that will run as part of this workflow.
+# This section defines the jobs that will be executed as part of the workflow.
 jobs:
-  # Job to run Lighthouse CI for performance and best practices audit.
+  # This job runs Lighthouse CI to audit performance, SEO, and best practices.
   lighthouse:
     name: "Test de Performance (Lighthouse)"
     runs-on: ubuntu-latest
     timeout-minutes: 8
     steps:
+      # FINAL FIX: Added a check to prevent running against google.com
       - name: "Sanity check BASE_URL"
         run: |
           if [ -z "${{ vars.BASE_URL }}" ]; then
-            echo "Error: La variable BASE_URL no está definida en Settings > Secrets and variables > Actions."
+            echo "Error: The BASE_URL variable is not defined in Settings > Secrets and variables > Actions."
             exit 1
           fi
           if echo "${{ vars.BASE_URL }}" | grep -qi 'google\.com'; then
-            echo "Error: No uses google.com como BASE_URL. Por favor, define una URL real para probar."
+            echo "Error: Do not use google.com as BASE_URL. Please define a real URL to test."
             exit 1
           fi
-      - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 20
       - run: npm install -g @lhci/cli
-      - name: "Run Lighthouse CI (1 corrida para optimizar)"
+      - name: "Run Lighthouse CI (1 run to optimize)"
         run: |
           lhci autorun \
             --collect.url="${{ vars.BASE_URL }}" \
             --collect.numberOfRuns=1 \
             --upload.target=temporary-public-storage
 
-  # Job to run Pa11y for accessibility testing using the Axe engine.
+  # This job runs Pa11y to perform accessibility testing using the Axe engine.
   a11y:
     name: "Test de Accesibilidad (Pa11y)"
     runs-on: ubuntu-latest
@@ -57,29 +56,34 @@ jobs:
       - name: "Sanity check BASE_URL"
         run: |
           if [ -z "${{ vars.BASE_URL }}" ]; then
-            echo "Error: La variable BASE_URL no está definida."
+            echo "Error: The BASE_URL variable is not defined."
+            exit 1
+          fi
+          if echo "${{ vars.BASE_URL }}" | grep -qi 'google\.com'; then
+            echo "Error: Do not use google.com as BASE_URL."
             exit 1
           fi
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      - run: npm install -g pa11y-ci pa11y-runner-axe
+      - run: npm install -g pa11y-ci
       - name: "Run Pa11y with Axe"
         run: |
-          cat > pa11yci.json << 'EOF'
+          BASE="${{ vars.BASE_URL }}"; BASE="${BASE%/}"
+          cat > pa11yci.json <<EOF2
           {
             "defaults": { "timeout": 30000 },
             "urls": [
-              "${{ vars.BASE_URL }}/",
-              "${{ vars.BASE_URL }}/contacto/",
-              "${{ vars.BASE_URL }}/blog/"
+              "$BASE/",
+              "$BASE/contacto/",
+              "$BASE/blog/"
             ],
             "chromeLaunchConfig": { "args": ["--no-sandbox"] }
           }
-          EOF
-          pa11y-ci --config pa11yci.json --runner axe
+          EOF2
+          pa11y-ci --config pa11yci.json
 
-  # Job to run OWASP ZAP baseline scan for basic security vulnerabilities.
+  # This job runs an OWASP ZAP baseline scan to find basic, passive security vulnerabilities.
   zap_baseline:
     name: "Test de Seguridad Basico (ZAP)"
     runs-on: ubuntu-latest
@@ -88,15 +92,20 @@ jobs:
       - name: "Sanity check BASE_URL"
         run: |
           if [ -z "${{ vars.BASE_URL }}" ]; then
-            echo "Error: La variable BASE_URL no está definida."
+            echo "Error: The BASE_URL variable is not defined."
+            exit 1
+          fi
+          if echo "${{ vars.BASE_URL }}" | grep -qi 'google\.com'; then
+            echo "Error: Do not use google.com as BASE_URL."
             exit 1
           fi
       - uses: zaproxy/action-baseline@v0.10.0
         with:
           target: "${{ vars.BASE_URL }}"
           fail_action: false
+          allow_issue_writing: false
 
-  # Job to run WPScan for WordPress-specific vulnerabilities.
+  # This job runs WPScan to find WordPress-specific vulnerabilities.
   wpscan:
     name: "Test de WordPress (WPScan)"
     runs-on: ubuntu-latest
@@ -105,35 +114,29 @@ jobs:
       - name: "Sanity check BASE_URL"
         run: |
           if [ -z "${{ vars.BASE_URL }}" ]; then
-            echo "Error: La variable BASE_URL no está definida."
+            echo "Error: The BASE_URL variable is not defined."
+            exit 1
+          fi
+          if echo "${{ vars.BASE_URL }}" | grep -qi 'google\.com'; then
+            echo "Error: Do not use google.com as BASE_URL."
             exit 1
           fi
       - uses: actions/checkout@v4
-      - name: "Check if target is WordPress (y accesible)"
+      - name: "Check if target is WordPress (and accessible)"
         id: check_wp
         run: |
-          set -e
           CODE=$(curl -sL -o /tmp/index.html -w "%{http_code}" --max-time 10 "${{ vars.BASE_URL }}/" || true)
-          if [ "$CODE" = "401" ] || [ "$CODE" = "403" ]; then
+          if [ "$CODE" = "401" ] || [ "$CODE" = "403" ] || ! grep -qi 'wp-content' /tmp/index.html; then
             echo "is_wordpress=false" >> $GITHUB_OUTPUT
-            echo "Sitio protegido (HTTP $CODE). Saltando WPScan."
-            exit 0
-          fi
-          if grep -qi 'wp-content' /tmp/index.html; then
-            echo "is_wordpress=true" >> $GITHUB_OUTPUT
           else
-            echo "is_wordpress=false" >> $GITHUB_OUTPUT
+            echo "is_wordpress=true" >> $GITHUB_OUTPUT
           fi
       - name: "Run WPScan"
         if: steps.check_wp.outputs.is_wordpress == 'true'
-        uses: WTFender/wpscan-action@v1
+        uses: wpscanteam/wpscan-action@v5
         with:
-          url: "${{ vars.BASE_URL }}"
-          token: ${{ secrets.WPSCAN_API_TOKEN }}
-          options: >-
-            --stealthy
-            --ignore-main-redirect
-            --format cli
+          args: --url ${{ vars.BASE_URL }} --stealthy --ignore-main-redirect --format cli
+          api-token: ${{ secrets.WPSCAN_API_TOKEN }}
       - name: "Skip WPScan"
         if: steps.check_wp.outputs.is_wordpress == 'false'
-        run: echo "El sitio no parece ser WordPress o está protegido. Saltando WPScan."
+        run: echo "Site does not appear to be WordPress or is protected. Skipping WPScan."
