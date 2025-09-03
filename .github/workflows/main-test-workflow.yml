@@ -122,8 +122,14 @@ jobs:
       - name: "Check if target is WordPress (and accessible)"
         id: check_wp
         run: |
-          CODE=$(curl -sL -o /tmp/index.html -w "%{http_code}" --max-time 10 "${{ vars.BASE_URL }}/" || true)
-          if [ "$CODE" = "401" ] || [ "$CODE" = "403" ] || ! grep -qi 'wp-content' /tmp/index.html; then
+          BASE="${{ vars.BASE_URL }}"; BASE="${BASE%/}"
+          CODE=$(curl -sL -A "Mozilla/5.0" --retry 2 --retry-all-errors -o /tmp/index.html -w "%{http_code}" --connect-timeout 7 --max-time 30 "$BASE/" || echo "000")
+          # Si curl falló o no dejó archivo, asumimos que NO procede WPScan
+          if [ ! -s /tmp/index.html ]; then
+            echo "is_wordpress=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          if [ "$CODE" = "401" ] || [ "$CODE" = "403" ] || ! grep -qiE 'wp-content|wp-includes' /tmp/index.html; then
             echo "is_wordpress=false" >> $GITHUB_OUTPUT
           else
             echo "is_wordpress=true" >> $GITHUB_OUTPUT
@@ -131,11 +137,10 @@ jobs:
       - name: "Run WPScan (official Docker image)"
         if: steps.check_wp.outputs.is_wordpress == 'true'
         run: |
-          docker run --rm \
+          docker run --rm --pull always \
             -e WPSCAN_API_TOKEN="${{ secrets.WPSCAN_API_TOKEN }}" \
             wpscanteam/wpscan \
               --url "${{ vars.BASE_URL }}" \
               --stealthy \
               --ignore-main-redirect \
-              --format cli \
-              --api-token "${{ secrets.WPSCAN_API_TOKEN }}"
+              --format cli
