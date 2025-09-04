@@ -1,5 +1,5 @@
 # This is the name of the workflow, which will be displayed in the GitHub Actions tab.
-name: QA Test General
+name: QA Test General — Crawler + Matrix
 
 # Principle of least privilege for GITHUB_TOKEN
 permissions:
