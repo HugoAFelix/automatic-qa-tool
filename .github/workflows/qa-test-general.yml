@@ -13,6 +13,15 @@ on:
         description: 'Número de URLs a saltar (ej: 30 para analizar el siguiente lote)'
         required: false
         default: '0'
+      url_limit:
+        description: 'Límite de URLs a analizar en esta corrida (opcional; sobreescribe MAX_URLS)'
+        required: false
+        default: ''
+      analyze_all:
+        description: 'Analizar TODAS las URLs encontradas (ignora límites). Puede tardar bastante.'
+        type: boolean
+        required: false
+        default: false
 
 # Ensure only one run at a time
 concurrency:
@@ -49,27 +58,44 @@ jobs:
           LIMIT: ${{ vars.MAX_URLS || 30 }}
         run: |
           set -e
-          # Lee parámetros
+          # Entradas de ejecución
           OFFSET=${{ github.event.inputs.url_offset || 0 }}
+          REQ_LIMIT='${{ github.event.inputs.url_limit }}'
+          ANALYZE_ALL='${{ github.event.inputs.analyze_all }}'
+
           BASE_URL_NO_SLASH="${BASE%/}"
-          LIMIT="$LIMIT"
 
-          # Rastrea (no falla si encuentra links rotos)
+          # Rastreo (no falla si hay links rotos)
           linkinator "$BASE_URL_NO_SLASH" --recurse --silent --timeout 10000 --format JSON > crawl.json || true
-
-          # Si no se generó el JSON, crea uno vacío para que jq no falle
+          # Si no hay JSON, coloca uno vacío para que jq no falle
           test -s crawl.json || echo '{"links":[]}' > crawl.json
 
-          # Rango del lote: [OFFSET+1 .. OFFSET+LIMIT]
-          START_LINE=$((OFFSET + 1))
-          END_LINE=$((OFFSET + LIMIT))
+          # Límite efectivo: prioridad al input; si vacío, usa MAX_URLS
+          if [ -n "$REQ_LIMIT" ]; then
+            EFFECTIVE_LIMIT="$REQ_LIMIT"
+          else
+            EFFECTIVE_LIMIT="$LIMIT"
+          fi
 
-          # Filtra internas, válidas y no-binarias; ordena y toma el lote
+          # Construye lista base (internas, status<400, no-binarias)
           jq -r '.links[] | select(.status < 400) | .url' crawl.json \
             | awk -v b="$BASE_URL_NO_SLASH" 'index($0,b)==1' \
-            | grep -Ev '\.(pdf|jpg|jpeg|png|gif|svg|webp|mp4|zip|rar|7z|gz|css|js|json|xml)$' \
-            | sort -u \
-            | sed -n "${START_LINE},${END_LINE}p" > urls.txt
+            | grep -Eiv '\.(pdf|jpg|jpeg|png|gif|svg|webp|mp4|zip|rar|7z|gz|css|js|json|xml)$' \
+            | sed 's/#.*$//' \
+            | sort -u > urls.all.txt
+
+          if [ "$ANALYZE_ALL" = "true" ]; then
+            echo "⚠️  Modo ANALYZE_ALL activado: se analizarán TODAS las URLs encontradas. Puede tardar."
+            sed -n '1,$p' urls.all.txt > urls.txt
+          else
+            START_LINE=$((OFFSET + 1))
+            END_LINE=$((OFFSET + EFFECTIVE_LIMIT))
+            sed -n "${START_LINE},${END_LINE}p" urls.all.txt > urls.txt
+            echo "Lote: OFFSET=$OFFSET  LIMIT=$EFFECTIVE_LIMIT  (líneas ${START_LINE}..${END_LINE})"
+          fi
+
+          echo "Total URLs descubiertas: $(wc -l < urls.all.txt)"
+          echo "URLs en este lote: $(wc -l < urls.txt)"
 
           # Pasa a JSON para la matriz
           jq -Rs 'split("\n") | map(select(length>0))' urls.txt > urls.json
@@ -107,6 +133,13 @@ jobs:
             --collect.url="${{ matrix.url }}" \
             --collect.numberOfRuns=1 \
             --upload.target=temporary-public-storage
+      - name: "Upload Lighthouse artifact"
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lighthouse-${{ strategy.job-index }}
+          path: .lighthouseci/
+          if-no-files-found: ignore
 
   # Pa11y job, now powered by the matrix
   a11y:
@@ -124,22 +157,30 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      - run: npm install -g pa11y-ci pa11y-runner-axe
+      - run: npm install -g pa11y-ci
       - name: "Run Pa11y on ${{ matrix.url }}"
         run: |
           URL="${{ matrix.url }}"
-          cat > pa11yci.json <<EOF
+          cat > pa11yci.json <<'EOF'
           {
             "defaults": {
               "timeout": 30000,
               "runners": ["axe"],
               "chromeLaunchConfig": { "args": ["--no-sandbox","--disable-setuid-sandbox"] }
             },
-            "urls": ["$URL"]
+            "urls": ["__URL__"]
           }
           EOF
-          # A test that finds errors should fail the job to provide a clear signal.
-          pa11y-ci --config pa11yci.json
+          sed -i "s|__URL__|${URL}|g" pa11yci.json
+          set -o pipefail
+          pa11y-ci --config pa11yci.json | tee pa11y-report.txt
+      - name: "Upload Pa11y report artifact"
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pa11y-${{ strategy.job-index }}
+          path: pa11y-report.txt
+          if-no-files-found: ignore
 
   # ZAP Baseline scan (unchanged)
   zap_baseline:
@@ -159,7 +200,7 @@ jobs:
           fail_action: false
           allow_issue_writing: false
 
-  # WPScan using official Docker image (unchanged)
+  # WPScan using official Docker image
   wpscan:
     name: "Test de WordPress (WPScan)"
     runs-on: ubuntu-latest
@@ -171,7 +212,17 @@ jobs:
             echo "Error: The BASE_URL variable is not defined."
             exit 1
           fi
+
+      # 🔀 Toggle WPScan desde variable de repo
+      - name: "WPScan toggle (repo var)"
+        run: |
+          if [ "${{ vars.WPSCAN_ENABLED || 'true' }}" != "true" ]; then
+            echo "WPScan desactivado via WPSCAN_ENABLED!=true. Saliendo del job sin ejecutar el escaneo."
+            exit 0
+          fi
+
       - name: "Check if target is WordPress (and accessible)"
+        if: ${{ vars.WPSCAN_ENABLED == 'true' }}
         id: check_wp
         run: |
           BASE="${{ vars.BASE_URL }}"; BASE="${BASE%/}"
@@ -185,13 +236,96 @@ jobs:
           else
             echo "is_wordpress=true" >> $GITHUB_OUTPUT
           fi
+
       - name: "Run WPScan (official Docker image)"
-        if: steps.check_wp.outputs.is_wordpress == 'true' && secrets.WPSCAN_API_TOKEN != ''
+        if: ${{ vars.WPSCAN_ENABLED == 'true' && steps.check_wp.outputs.is_wordpress == 'true' && secrets.WPSCAN_API_TOKEN != '' }}
         run: |
+          set -o pipefail
           docker run --rm wpscanteam/wpscan \
             --url "${{ vars.BASE_URL }}" \
             --stealthy \
             --ignore-main-redirect \
             --format cli \
-            --api-token "${{ secrets.WPSCAN_API_TOKEN }}"
+            --api-token "${{ secrets.WPSCAN_API_TOKEN }}" | tee wpscan-report.txt
+
+      - name: "Upload WPScan report artifact"
+        if: ${{ vars.WPSCAN_ENABLED == 'true' && steps.check_wp.outputs.is_wordpress == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: wpscan-report
+          path: wpscan-report.txt
+          if-no-files-found: ignore
+
+  generate-report:
+    name: "Paso Final: Generar Reporte Unificado"
+    needs: [discover-urls, lighthouse, a11y, zap_baseline, wpscan]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: "Download all artifacts"
+        uses: actions/download-artifact@v4
+        with:
+          path: reports
+
+      - name: "Build full-report.md"
+        run: |
+          echo "# Reporte de Auditoría QA Completo" > full-report.md
+          echo "Fecha: $(date)" >> full-report.md
+          echo "" >> full-report.md
+
+          if [ -f reports/discovered-urls/urls.txt ]; then
+            echo "## URLs Analizadas" >> full-report.md
+            nl -ba reports/discovered-urls/urls.txt >> full-report.md
+            echo "" >> full-report.md
+          fi
+
+          echo "---" >> full-report.md
+          echo "## Lighthouse" >> full-report.md
+          if ls reports/lighthouse-*/.lighthouseci/*.html >/dev/null 2>&1; then
+            for f in reports/lighthouse-*/.lighthouseci/*.html; do
+              echo "### Archivo: $f" >> full-report.md
+              echo "_(HTML embebido no se muestra en Markdown; abre el artefacto para verlo)_" >> full-report.md
+              echo "" >> full-report.md
+            done
+          else
+            echo "Sin artefactos de Lighthouse." >> full-report.md
+          fi
+
+          echo "---" >> full-report.md
+          echo "## Accesibilidad (Pa11y)" >> full-report.md
+          if ls reports/pa11y-*/pa11y-report.txt >/dev/null 2>&1; then
+            for f in reports/pa11y-*/pa11y-report.txt; do
+              echo "### Archivo: $f" >> full-report.md
+              echo '```' >> full-report.md
+              cat "$f" >> full-report.md
+              echo '```' >> full-report.md
+              echo "" >> full-report.md
+            done
+          else
+            echo "Sin artefactos de Pa11y." >> full-report.md
+          fi
+
+          echo "---" >> full-report.md
+          echo "## Seguridad (ZAP)" >> full-report.md
+          if [ -f reports/zap_scan/report_md.md ]; then
+            cat reports/zap_scan/report_md.md >> full-report.md
+          else
+            echo "Sin artefacto de ZAP." >> full-report.md
+          fi
+          echo ""
+
+          echo "---" >> full-report.md
+          echo "## WordPress (WPScan)" >> full-report.md
+          if [ -f reports/wpscan-report/wpscan-report.txt ]; then
+            echo '```' >> full-report.md
+            cat reports/wpscan-report/wpscan-report.txt >> full-report.md
+            echo '```' >> full-report.md
+          else
+            echo "El análisis de WPScan no se ejecutó o no generó artefacto." >> full-report.md
+          fi
+      - name: "Upload consolidated report"
+        uses: actions/upload-artifact@v4
+        with:
+          name: full-qa-report
+          path: full-report.md
 
