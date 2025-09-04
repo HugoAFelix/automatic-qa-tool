@@ -67,7 +67,7 @@ jobs:
           BASE_URL_NO_SLASH="${BASE%/}"
 
           # Rastreo (no falla si hay links rotos)
-          linkinator "$BASE_URL_NO_SLASH" --recurse --silent --timeout 10000 --format JSON > crawl.json || true
+          linkinator "$BASE_URL_NO_SLASH" --recurse --silent --timeout 15000 --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" --format JSON > crawl.json || true
           # Si no hay JSON, coloca uno vacío para que jq no falle
           test -s crawl.json || echo '{"links":[]}' > crawl.json
 
