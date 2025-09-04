@@ -36,6 +36,7 @@ jobs:
     outputs:
       # The output is a JSON string array of URLs for consumption by matrix strategies.
       url_matrix: ${{ steps.make_matrix.outputs.urls }}
+      total_urls: ${{ steps.count_all.outputs.total_urls }}
     steps:
       - name: "Sanity check BASE_URL"
         run: |
@@ -46,7 +47,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      - name: "Install and run Linkinator crawler"
+      - name: "Install Linkinator"
         run: npm install -g linkinator@4
       - name: Ensure jq
         run: sudo apt-get update && sudo apt-get install -y jq
@@ -99,6 +100,11 @@ jobs:
 
           # Pasa a JSON para la matriz
           jq -Rs 'split("\n") | map(select(length>0))' urls.txt > urls.json
+      - name: "Count all discovered URLs"
+        id: count_all
+        run: |
+          TOTAL=$(wc -l < urls.all.txt || echo 0)
+          echo "total_urls=$TOTAL" >> "$GITHUB_OUTPUT"
       - name: "Prepare matrix for subsequent jobs"
         id: make_matrix
         run: echo "urls=$(cat urls.json)" >> "$GITHUB_OUTPUT"
@@ -106,7 +112,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: discovered-urls
-          path: urls.txt
+          path: |
+            urls.txt
+            urls.all.txt
 
   # Lighthouse job, now powered by the matrix
   lighthouse:
@@ -238,15 +246,21 @@ jobs:
           fi
 
       - name: "Run WPScan (official Docker image)"
-        if: ${{ vars.WPSCAN_ENABLED == 'true' && steps.check_wp.outputs.is_wordpress == 'true' && secrets.WPSCAN_API_TOKEN != '' }}
+        if: ${{ vars.WPSCAN_ENABLED == 'true' && steps.check_wp.outputs.is_wordpress == 'true' }}
+        env:
+          WPSCAN_API_TOKEN: ${{ secrets.WPSCAN_API_TOKEN }}
         run: |
+          if [ -z "$WPSCAN_API_TOKEN" ]; then
+            echo "WPSCAN_API_TOKEN not found. Skipping WPScan."
+            exit 0
+          fi
           set -o pipefail
           docker run --rm wpscanteam/wpscan \
             --url "${{ vars.BASE_URL }}" \
             --stealthy \
             --ignore-main-redirect \
             --format cli \
-            --api-token "${{ secrets.WPSCAN_API_TOKEN }}" | tee wpscan-report.txt
+            --api-token "$WPSCAN_API_TOKEN" | tee wpscan-report.txt
 
       - name: "Upload WPScan report artifact"
         if: ${{ vars.WPSCAN_ENABLED == 'true' && steps.check_wp.outputs.is_wordpress == 'true' }}
@@ -266,18 +280,17 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: reports
+          if-no-files-found: warn
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: discovered-urls
+          path: reports/discovered-urls
+          if-no-files-found: ignore
 
       - name: "Build full-report.md"
         run: |
-          echo "# Reporte de Auditoría QA Completo" > full-report.md
-          echo "Fecha: $(date)" >> full-report.md
-          echo "" >> full-report.md
-
-          if [ -f reports/discovered-urls/urls.txt ]; then
-            echo "## URLs Analizadas" >> full-report.md
-            nl -ba reports/discovered-urls/urls.txt >> full-report.md
-            echo "" >> full-report.md
-          fi
+          echo "" > full-report.md
 
           echo "---" >> full-report.md
           echo "## Lighthouse" >> full-report.md
@@ -323,6 +336,25 @@ jobs:
           else
             echo "El análisis de WPScan no se ejecutó o no generó artefacto." >> full-report.md
           fi
+
+          {
+            echo "# Reporte de Auditoría QA Completo"
+            echo "Fecha: $(date)"
+            echo
+            echo "## Resumen de descubrimiento"
+            echo "- URLs descubiertas (totales): ${{ needs.discover-urls.outputs.total_urls }}"
+            echo "- analyze_all: ${{ inputs.analyze_all }}"
+            echo "- url_offset: ${{ inputs.url_offset }}"
+            echo "- url_limit: ${{ inputs.url_limit }}"
+            echo
+            echo "## URLs Analizadas (lote actual)"
+            if [ -f reports/discovered-urls/urls.txt ]; then nl -ba reports/discovered-urls/urls.txt; else echo "(sin artefacto)"; fi
+            echo
+          } > full-report.md.tmp
+
+          # concatena el resto del contenido que ya generabas al full-report
+          cat full-report.md >> full-report.md.tmp 2>/dev/null || true
+          mv -f full-report.md.tmp full-report.md
       - name: "Upload consolidated report"
         uses: actions/upload-artifact@v4
         with:
