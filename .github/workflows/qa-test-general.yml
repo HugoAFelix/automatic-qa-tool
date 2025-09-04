@@ -85,6 +85,19 @@ jobs:
             | sed 's/#.*$//' \
             | sort -u > urls.all.txt
 
+          # Fallback: si no salió nada del crawler, intenta sitemap.xml
+          if [ ! -s urls.all.txt ]; then
+            echo "Crawler vacío; intentando sitemap.xml…"
+            curl -fsSL "$BASE_URL_NO_SLASH/sitemap.xml" -o sitemap.xml || true
+            if [ -s sitemap.xml ]; then
+              grep -oP '(?<=<loc>)[^<]+' sitemap.xml \
+                | awk -v b="$BASE_URL_NO_SLASH" 'index($0,b)==1' \
+                | sed 's/#.*$//' \
+                | sort -u > urls.all.txt
+              echo "Sitemap aportó $(wc -l < urls.all.txt) URLs."
+            fi
+          fi
+
           if [ "$ANALYZE_ALL" = "true" ]; then
             echo "⚠️  Modo ANALYZE_ALL activado: se analizarán TODAS las URLs encontradas. Puede tardar."
             sed -n '1,$p' urls.all.txt > urls.txt
@@ -263,7 +276,7 @@ jobs:
             --api-token "$WPSCAN_API_TOKEN" | tee wpscan-report.txt
 
       - name: "Upload WPScan report artifact"
-        if: ${{ vars.WPSCAN_ENABLED == 'true' && steps.check_wp.outputs.is_wordpress == 'true' }}
+        if: ${{ always() && vars.WPSCAN_ENABLED == 'true' && steps.check_wp.outputs.is_wordpress == 'true' }}
         uses: actions/upload-artifact@v4
         with:
           name: wpscan-report
