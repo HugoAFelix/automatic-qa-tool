@@ -6,7 +6,14 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, "..");
 
 // Directories/files to include
-const includeDirs = ["src", "server", "tests", "lib", "scripts"];
+const includeDirs = [
+  "src",
+  "server",
+  "tests",
+  "lib",
+  "scripts",
+  ".github/workflows",
+];
 const includeFiles = ["uno.config.js", "vite.config.js", "package.json"];
 const binaryExts = [
   ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".pdf", ".zip", ".ico",
@@ -66,7 +73,7 @@ async function main() {
   } catch {}
 
   let out = `# Full Code Reference\n\n`;
-  out += `Includes source files from src, server, tests, lib, and scripts plus key config files. Excludes node_modules and build outputs.\n\n`;
+  out += `Includes source files from src, server, tests, lib, scripts, and .github/workflows plus key config files. Excludes node_modules and build outputs.\n\n`;
   out += `Regenerate with \`npm run docs:code:regen\`.\n\n`;
   out += `## File Index\n\n`;
   for (const f of files) out += `- ${f}\n`;
