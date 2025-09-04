@@ -156,6 +156,7 @@ jobs:
             --collect.url="${{ matrix.url }}" \
             --collect.numberOfRuns=1 \
             --upload.target=temporary-public-storage
+            --output-path=./.lighthouseci/lhr.html
       - name: "Upload Lighthouse artifact"
         if: always()
         uses: actions/upload-artifact@v4
