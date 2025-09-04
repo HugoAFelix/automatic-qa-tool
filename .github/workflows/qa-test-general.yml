@@ -120,7 +120,9 @@ jobs:
           echo "total_urls=$TOTAL" >> "$GITHUB_OUTPUT"
       - name: "Prepare matrix for subsequent jobs"
         id: make_matrix
-        run: echo "urls=$(cat urls.json)" >> "$GITHUB_OUTPUT"
+        run: |
+          URLS=$(jq -c . urls.json)
+          echo "urls=$URLS" >> "$GITHUB_OUTPUT"
       - name: "Upload discovered URLs as artifact"
         uses: actions/upload-artifact@v4
         with:
@@ -293,13 +295,11 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: reports
-          if-no-files-found: warn
 
       - uses: actions/download-artifact@v4
         with:
           name: discovered-urls
           path: reports/discovered-urls
-          if-no-files-found: ignore
 
       - name: "Build full-report.md"
         run: |
